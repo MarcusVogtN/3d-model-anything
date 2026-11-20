@@ -128,6 +128,11 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
   private(set) lazy var scanView: ScanView = {
     let scan = ScanView(session: arSession, engine: engine)
     scanHelper.attach(to: scan.view)
+    scanHelper.onAllDone = { [weak self] in
+      guard let self, self.phase == .scanning else { return }
+      self.show(notice: ScanHelperText.allDone)
+      self.finishRoom()
+    }
     scan.onSessionFailure = { [weak self] chain in
       guard let self, !self.closed else { return }
       self.sessionNeedsRestart = true
@@ -707,6 +712,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     guard phase == .scanning else { return }
     if paused { resume() }
     commitCandidate(allowHighResolution: false)
+    scanHelper.stopGuide()
     phase = .finishingRoom
     scanView.feed.isOn = false // freeze accepted mesh input for the export barrier
     // export the mesh while it's all still there, then let RoomPlan wrap up (didEndWith → finish)

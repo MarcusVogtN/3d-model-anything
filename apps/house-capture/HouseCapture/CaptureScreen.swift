@@ -8,6 +8,8 @@ struct CaptureScreen: View {
   let onClose: () -> Void
   @State private var reviewing = false
   @State private var confirmClose = false
+  @State private var almostDone = false
+  @State private var almostDoneSpots = 0
   @FocusState private var nameFocused: Bool
   @Environment(\.scenePhase) private var scenePhase
   static let roomSuggestions = ["Living room", "Kitchen", "Dining room", "Office", "Bedroom", "Primary bedroom", "Bathroom", "Hallway", "Basement", "Playroom", "Laundry", "Garage"]
@@ -17,6 +19,9 @@ struct CaptureScreen: View {
   var body: some View {
     ZStack {
       ARViewContainer(view: controller.scanView.view).ignoresSafeArea()
+      if scanning, controller.captureReady, !controller.paused {
+        ScanHelperGuide(helper: controller.scanHelper)
+      }
 
       VStack {
         topBar
@@ -72,6 +77,7 @@ struct CaptureScreen: View {
       }
       Button("Keep scanning", role: .cancel) {}
     }
+    .sheet(isPresented: $almostDone) { almostDoneSheet }
     .sheet(isPresented: $reviewing) {
       if let source = controller.reviewSource {
         NavigationStack { ScanReview(source: source).toolbar { Button("Done") { reviewing = false } } }
@@ -326,11 +332,8 @@ struct CaptureScreen: View {
   private var scanControls: some View {
     VStack(spacing: 10) {
       if controller.captureReady {
-        ScanHelperHUD(helper: controller.scanHelper)
-        tip(controller.quality.ready ? controller.quality.message : (controller.instruction ?? controller.quality.message))
-        if controller.coveragePlateau && !controller.quality.ready {
-          tip("Photo detail isn't improving much. You can save and review what you have; you don't need to keep circling.")
-        }
+        // one instruction at a time: the scan helper's hint first, else the coverage tips
+        ScanHelperHUD(helper: controller.scanHelper, fallback: coverageTips)
         if controller.captureBudget.constrained { Text("Reducing background capture to keep scanning responsive.").font(.caption).foregroundStyle(.white) }
       }
       HStack(spacing: 14) {
@@ -340,7 +343,7 @@ struct CaptureScreen: View {
         }
         .buttonStyle(.bordered)
         shutter
-        Button(controller.quality.ready ? "Finish room ✓" : "Save room", action: controller.finishRoom)
+        Button(controller.quality.ready ? "Finish room ✓" : "Save room", action: finishTapped)
           .buttonStyle(.borderedProminent)
           .tint(controller.quality.ready ? .green : .accentColor)
           .controlSize(.large)
@@ -360,6 +363,49 @@ struct CaptureScreen: View {
     .disabled(!controller.canTakePhoto)
     .opacity(controller.canTakePhoto ? 1 : 0.4)
     .accessibilityLabel("Take reference photo")
+  }
+
+  private var coverageTips: [String] {
+    var tips: [String] = []
+    if controller.coveragePlateau && !controller.quality.ready {
+      tips.append("Photo detail isn't improving much. You can save and review what you have; you don't need to keep circling.")
+    }
+    tips.append(controller.quality.ready ? controller.quality.message : (controller.instruction ?? controller.quality.message))
+    return tips
+  }
+
+  /// Before finishing: one simple sheet when hard spots or big gaps remain. Never blocks finishing.
+  private func finishTapped() {
+    let helper = controller.scanHelper
+    let gaps = controller.stats.percent < ScanHelper.finishGapPercent
+    if !helper.guiding, helper.openSpots > 0 || gaps {
+      almostDoneSpots = helper.openSpots
+      almostDone = true
+    } else {
+      controller.finishRoom()
+    }
+  }
+
+  private var almostDoneSheet: some View {
+    VStack(spacing: 14) {
+      Text(ScanHelperText.almostDone(spots: almostDoneSpots)).font(.title3.weight(.semibold)).multilineTextAlignment(.center)
+      Text(ScanHelperText.almostDoneDetail).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+      Button {
+        almostDone = false
+        controller.scanHelper.startGuide()
+      } label: {
+        Text(ScanHelperText.showMe).frame(maxWidth: .infinity)
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.large)
+      Button(ScanHelperText.finishAnyway) {
+        almostDone = false
+        controller.finishRoom()
+      }
+      .font(.footnote)
+    }
+    .padding()
+    .presentationDetents([.height(280)])
   }
 
   private func tip(_ text: String) -> some View {
@@ -585,7 +631,7 @@ struct CoverageRing: View {
 private struct Legend: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
-      ForEach([(Color.red, "needs photos"), (.green, "captured"), (ScanHelperHUD.purple, "hard spot")], id: \.1) { color, label in
+      ForEach([(Color.red, "needs photos"), (.green, "captured"), (ScanHelperHUD.purple, ScanHelperText.legendHardSpot)], id: \.1) { color, label in
         HStack(spacing: 4) {
           Circle().fill(color).frame(width: 7, height: 7)
           Text(label).font(.system(size: 9))

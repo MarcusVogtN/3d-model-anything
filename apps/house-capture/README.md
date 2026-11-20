@@ -160,9 +160,19 @@ shiny things, glass, clutter) and asks for the photos they need. Guidance only: 
   drawn as translucent **purple** cubes, **green** once done. Thresholds match the PC check (`HardAreas.swift`).
 - **Angle checklist** per spot, from saved photos within 2.5 m that look at it (central ~60°): 8 azimuth
   sectors, from above (≥ 0.3 m over the top, pitched down > 25°; needed when the top is below 1.7 m), low
-  (camera < 0.8 m; needed when the bottom is below 0.5 m) and one manual close-up within 1 m. A sector only
+  (camera < 0.8 m; needed when the bottom is below 0.5 m) and one close-up within 1 m (any photo: the app
+  takes it itself when you are close and steady). A sector only
   counts as needed when someone can stand there (inside the room outline, no LiDAR mesh 0.1–1.9 m high
-  within 0.2 m). Done = all reachable sectors or 3, plus the extras. The chip says what to do next.
+  within 0.2 m). Done = all reachable sectors or 3, plus the extras. The hint says what to do next, without
+  counts: the spot turning from purple to green is the progress signal.
+- **One instruction at a time**, by priority: tracking problem (its own panel) > too dark > move slower >
+  bright window > hard spot next angle > the existing coverage tip.
+- **Start check**: dark in the first 6 s of a room shows "Turn on the lights for the best result" once.
+- **Before finishing**: *Save room* with open hard spots (or photo detail under 70%) opens one sheet,
+  "Almost done: N spots need a closer look", with **Show me** and *Finish anyway*. Show me guides to the
+  nearest open spot (pulsing ring on screen, chevron at the edge when off screen, "Walk to the purple spot",
+  then the next angle); when every spot is green it says "All done" and saves the room. Never blocks finishing.
+  All scan helper strings are in `ScanHelperText.swift` for translation.
 - **Move slower** above 60°/s or 0.6 m/s (smoothed over 0.3 s; light haptic at most every 3 s).
 - **Too dark** (ambient light < 250 or ISO > 800 for 2 s) and **bright window/lamp** (> 8% of luma ≥ 250).
 - **Auto photos near hard spots**: a view that adds a missing angle (new sector, from above, low) to a

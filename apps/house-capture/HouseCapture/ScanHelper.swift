@@ -350,6 +350,13 @@ final class ScanHelper: ObservableObject {
     var text: String
     var icon: String
   }
+  /// The one hint the HUD shows
+  struct Hint: Equatable {
+    var text: String
+    var icon: String
+    /// orange warning capsule (true) or purple hard-spot chip (false)
+    var warning: Bool
+  }
 
   @Published private(set) var chip: Chip?
   @Published private(set) var moveSlower = false
@@ -357,16 +364,30 @@ final class ScanHelper: ObservableObject {
   @Published private(set) var glare = false
   @Published private(set) var hardSpots = 0
   @Published private(set) var doneSpots = 0
+  /// "Show me": guiding to the nearest spot that isn't done
+  @Published private(set) var guiding = false
+  /// guide marker: on-screen point of the spot (view points), or the edge direction when off-screen
+  @Published private(set) var guidePoint: CGPoint?
+  @Published private(set) var guideAngle: Double?
+  @Published private(set) var startTip = false
+  /// called once when guiding and every hard spot turned green
+  var onAllDone: (() -> Void)?
+  var openSpots: Int { max(0, hardSpots - doneSpots) }
+  /// finishing with less photo detail than this offers "Show me" too
+  static let finishGapPercent = 70
   private(set) var slowSeconds: Double = 0
   private(set) var darkSeconds: Double = 0
   private(set) var glareSeconds: Double = 0
 
-  var warnings: [Warning] {
-    var out: [Warning] = []
-    if moveSlower { out.append(Warning(text: "Move slower", icon: "tortoise.fill")) }
-    if tooDark { out.append(Warning(text: "Too dark: turn on more lights", icon: "lightbulb.fill")) }
-    if glare { out.append(Warning(text: "Bright window/lamp in view: film at an angle or close the curtain", icon: "sun.max.fill")) }
-    return out
+  /// One instruction at a time, by priority: too dark > move slower > bright window > hard spot.
+  /// (Tracking problems are shown by the capture screen instead of any hint; nil = the app's own hint.)
+  var hint: Hint? {
+    if startTip { return Hint(text: ScanHelperText.startDark, icon: "lightbulb.fill", warning: true) }
+    if tooDark { return Hint(text: ScanHelperText.tooDark, icon: "lightbulb.fill", warning: true) }
+    if moveSlower { return Hint(text: ScanHelperText.moveSlower, icon: "tortoise.fill", warning: true) }
+    if glare { return Hint(text: ScanHelperText.glare, icon: "sun.max.fill", warning: true) }
+    if let chip { return Hint(text: chip.title, icon: "cube.transparent.fill", warning: false) }
+    return nil
   }
 
   let node = SCNNode()
@@ -396,6 +417,15 @@ final class ScanHelper: ObservableObject {
   private var lastRoomUpdate: TimeInterval = 0
   private var darkSince: TimeInterval?
   private let haptic = UIImpactFeedbackGenerator(style: .light)
+  private weak var view: ARSCNView?
+  private var roomStartedAt: TimeInterval?
+  private var startTipShown = false
+  private var startTipUntil: TimeInterval = 0
+  private var lastGuide: TimeInterval = 0
+  private var guideHadSpots = false
+  /// the start check looks for darkness this long after a room starts (s)
+  private static let startCheckSeconds: TimeInterval = 6
+  private static let startTipSeconds: TimeInterval = 4
 
   /// the chip only shows for clusters inside this half-angle of the view
   private static let chipHalfAngle: Float = 35 * .pi / 180
@@ -405,6 +435,7 @@ final class ScanHelper: ObservableObject {
   }
 
   func attach(to view: ARSCNView) {
+    self.view = view
     if node.parent == nil { view.scene.rootNode.addChildNode(node) }
   }
 
@@ -428,6 +459,24 @@ final class ScanHelper: ObservableObject {
     darkSince = nil
     lastRoomUpdate = 0
     node.geometry = nil
+    roomStartedAt = nil
+    startTipShown = false
+    startTip = false
+    stopGuide()
+  }
+
+  /// "Show me": guide to the nearest spot that isn't done, until all are green
+  func startGuide() {
+    guiding = true
+    guideHadSpots = openSpots > 0
+    lastChip = 0
+  }
+
+  func stopGuide() {
+    guiding = false
+    guideHadSpots = false
+    guidePoint = nil
+    guideAngle = nil
   }
 
   /// RoomPlan's live room (throttled): walls to ignore, the outline for reachability, the floor
@@ -449,6 +498,8 @@ final class ScanHelper: ObservableObject {
   /// Every new ARFrame while scanning and capturing
   func tick(_ frame: ARFrame, budget: CaptureBudget, engine: CoverageEngine, iso: () -> Float?) {
     let ts = frame.timestamp
+    if roomStartedAt == nil { roomStartedAt = ts }
+    if startTip, ts >= startTipUntil { startTip = false }
     let dt = lastTick.map { min(0.1, max(0, ts - $0)) } ?? 0
     lastTick = ts
 
@@ -490,6 +541,10 @@ final class ScanHelper: ObservableObject {
       lastChip = ts
       updateChip(frame.camera.transform)
     }
+    if guiding, ts - lastGuide >= 0.1 {
+      lastGuide = ts
+      updateGuideMarker(frame.camera.transform)
+    }
   }
 
   /// Writes the room's hard_areas.json; true when written
@@ -529,6 +584,10 @@ final class ScanHelper: ObservableObject {
     let done = clusters.filter { $0.status.done }.count
     if hardSpots != clusters.count { hardSpots = clusters.count }
     if doneSpots != done { doneSpots = done }
+    if guiding, guideHadSpots, done == clusters.count {
+      stopGuide()
+      onAllDone?()
+    }
     guard let o = result.overlay else {
       node.geometry = nil
       return
@@ -555,36 +614,81 @@ final class ScanHelper: ObservableObject {
     } else {
       darkSince = nil
     }
-    let dark = darkSince.map { ts - $0 >= LightCheck.darkHold } ?? false
+    // start check: dark in the first seconds of a room → one gentle tip, once
+    if darkNow, !startTipShown, let start = roomStartedAt, ts - start < Self.startCheckSeconds {
+      startTipShown = true
+      startTip = true
+      startTipUntil = ts + Self.startTipSeconds
+    }
+    let dark = !startTip && (darkSince.map { ts - $0 >= LightCheck.darkHold } ?? false)
     if dark != tooDark { tooDark = dark }
     let bright = LightCheck.brightFraction(frame.capturedImage) > LightCheck.glareFraction
     if bright != glare { glare = bright }
   }
 
-  private func updateChip(_ t: simd_float4x4) {
+  /// the spot to talk about: while guiding, the nearest open one anywhere; otherwise one in view
+  private func target(_ t: simd_float4x4) -> (cluster: HardAreas.Cluster, inView: Bool)? {
     let camera = simd_make_float3(t.columns.3)
     let forward = -simd_normalize(simd_make_float3(t.columns.2))
-    var best: HardAreas.Cluster?
+    var best: (cluster: HardAreas.Cluster, inView: Bool)?
     var bestDistance = Float.infinity
     for c in clusters where !c.status.done {
       let to = c.center - camera
       let d = simd_length(to)
-      guard d > 0.05, d < HardAreas.chipDistance, d < bestDistance else { continue }
-      guard simd_dot(to / d, forward) >= cos(Self.chipHalfAngle) else { continue }
-      best = c
+      guard d > 0.05, d < bestDistance else { continue }
+      let inView = d < HardAreas.chipDistance && simd_dot(to / d, forward) >= cos(Self.chipHalfAngle)
+      guard inView || guiding else { continue }
+      best = (c, inView)
       bestDistance = d
     }
-    guard let c = best,
-          let step = HardAreas.next(c.status, cameraSector: HardAreas.sector(of: camera, around: c.center)) else {
+    return best
+  }
+
+  private func updateChip(_ t: simd_float4x4) {
+    let camera = simd_make_float3(t.columns.3)
+    let forward = -simd_normalize(simd_make_float3(t.columns.2))
+    guard let found = target(t) else {
       if chip != nil { chip = nil }
       return
     }
-    // right of the view, level (independent of how the phone is held)
-    let flat = simd_cross(forward, SIMD3<Float>(0, 1, 0))
-    let right = simd_length(flat) > 1e-4 ? simd_normalize(flat) : simd_make_float3(t.columns.0)
-    let title = "Hard spot (\(c.kind.rawValue)): \(c.status.have) of \(c.status.total) angles"
-    let detail = "Next: " + HardAreas.action(step, cluster: c, camera: camera, right: right)
-    let next = Chip(title: title, detail: detail)
+    let c = found.cluster, inView = found.inView
+    var action = ScanHelperText.walkToSpot
+    if inView, let step = HardAreas.next(c.status, cameraSector: HardAreas.sector(of: camera, around: c.center)) {
+      // right of the view, level (independent of how the phone is held)
+      let flat = simd_cross(forward, SIMD3<Float>(0, 1, 0))
+      let right = simd_length(flat) > 1e-4 ? simd_normalize(flat) : simd_make_float3(t.columns.0)
+      action = HardAreas.action(step, cluster: c, camera: camera, right: right)
+    }
+    // no counts: the spot turning from purple to green is the progress signal
+    let next = Chip(title: ScanHelperText.hardSpot(action), detail: "")
     if chip != next { chip = next }
+  }
+
+  /// Guide marker: pulse on the spot when it's on screen, else a chevron at the screen edge
+  private func updateGuideMarker(_ t: simd_float4x4) {
+    guard let view, let c = target(t)?.cluster else {
+      if guidePoint != nil { guidePoint = nil }
+      if guideAngle != nil { guideAngle = nil }
+      return
+    }
+    let camera = simd_make_float3(t.columns.3)
+    let forward = -simd_normalize(simd_make_float3(t.columns.2))
+    var p = c.center
+    let ahead = simd_dot(p - camera, forward)
+    let behind = ahead <= 0.05
+    if behind { p -= forward * (2 * ahead - 0.5) } // mirror in front, same side
+    let s = view.projectPoint(SCNVector3(p.x, p.y, p.z))
+    let size = view.bounds.size
+    let point = CGPoint(x: CGFloat(s.x), y: CGFloat(s.y))
+    let margin: CGFloat = 40
+    let onScreen = !behind && point.x > margin && point.x < size.width - margin && point.y > margin && point.y < size.height - margin
+    if onScreen {
+      guidePoint = point
+      if guideAngle != nil { guideAngle = nil }
+    } else {
+      let dx = Double(point.x - size.width / 2), dy = Double(point.y - size.height / 2)
+      guideAngle = (dx == 0 && dy == 0) ? Double.pi / 2 : atan2(dy, dx)
+      if guidePoint != nil { guidePoint = nil }
+    }
   }
 }

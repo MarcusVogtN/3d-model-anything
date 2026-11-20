@@ -100,10 +100,10 @@ final class SelfTest {
     let above = c.center + SIMD3(0.5, 0.8, 0)
     expect(HA.addsAngle(c, view: look(from: above), floorY: 0), "a view from above adds a missing angle")
     photos.append(look(from: above))
-    photos.append(look(from: c.center + SIMD3(0.7, 0, 0.2), manual: true))
+    photos.append(look(from: c.center + SIMD3(0.7, 0, 0.2))) // auto close-up counts
     c.angles = HA.observe(c, photos: photos, floorY: 0, reachable: reach)
     c.status = HA.status(c, c.angles, floorY: 0)
-    expect(c.status.done && c.status.have == c.status.total, "sectors + above + close-up is done")
+    expect(c.status.done && c.status.have == c.status.total, "sectors + above + auto close-up is done")
     expect(!HA.addsAngle(c, view: look(from: ring[0]), floorY: 0), "done clusters don't ask for more photos")
     var meter = MotionMeter()
     for i in 0..<30 { meter.update(time: Double(i) / 60, transform: moved(SIMD3(Float(i) / 60, 0, 0))) }

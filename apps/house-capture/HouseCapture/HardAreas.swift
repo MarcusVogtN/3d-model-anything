@@ -40,7 +40,7 @@ enum HardAreas {
   /// "low": camera lower than floor + this (m); only needed when the cluster bottom is below floor + lowNeededBelow
   static let lowCameraHeight: Float = 0.8
   static let lowNeededBelow: Float = 0.5
-  /// a manual shutter photo this close (m) is the close-up
+  /// a photo (auto or manual) this close (m) is the close-up
   static let closeupDistance: Float = 1.0
   /// sectors needed when more are reachable
   static let minSectors = 3
@@ -259,7 +259,7 @@ enum HardAreas {
       a.sectors[sector(of: v.position, around: c)] = true
       if v.position.y >= cluster.max.y + aboveHeight, v.forward.y < -sin(abovePitch) { a.above = true }
       if let floorY, v.position.y - floorY < lowCameraHeight { a.low = true }
-      if v.manual, simd_distance(v.position, c) <= closeupDistance { a.closeup = true }
+      if simd_distance(v.position, c) <= closeupDistance { a.closeup = true } // any photo, auto or manual
     }
     return a
   }
@@ -273,6 +273,7 @@ enum HardAreas {
     let missing = cluster.status.missing
     if missing.contains(.above), v.position.y >= cluster.max.y + aboveHeight, v.forward.y < -sin(abovePitch) { return true }
     if missing.contains(.low), let floorY, v.position.y - floorY < lowCameraHeight { return true }
+    if missing.contains(.closeup), simd_distance(v.position, cluster.center) <= closeupDistance { return true }
     return false
   }
 
@@ -364,23 +365,23 @@ enum HardAreas {
   /// The step as an instruction, for a camera at camera with right vector right (world)
   static func action(_ step: Step, cluster c: Cluster, camera: SIMD3<Float>, right: SIMD3<Float>) -> String {
     switch step {
-    case .above: return "Hold the phone above it and look down"
-    case .low: return "Crouch down and film low"
+    case .above: return ScanHelperText.fromAbove
+    case .low: return ScanHelperText.low
     case .closeup:
       let d = simd_distance(camera, c.center)
-      return d <= closeupDistance ? "Tap the shutter for a close-up of the label" : "Get within 1 m and tap the shutter for a close-up"
+      return d <= closeupDistance ? ScanHelperText.holdStill : ScanHelperText.closeUp
     case .sector(let i):
       let here = sector(of: camera, around: c.center)
       let raw = abs(i - here) % sectorCount
       let steps = Swift.min(raw, sectorCount - raw)
       if steps == 0 {
-        return simd_distance(camera, c.center) > viewDistance ? "Step closer (within 2.5 m)" : "Point the camera straight at it"
+        return simd_distance(camera, c.center) > viewDistance ? ScanHelperText.stepCloser : ScanHelperText.pointAtIt
       }
-      if steps >= 3 { return "Walk around to the far side" }
+      if steps >= 3 { return ScanHelperText.farSide }
       let target = standPoint(c.center, sector: i, radius: 1.2)
       let to = SIMD2<Float>(target.x - camera.x, target.y - camera.z)
       let side = to.x * right.x + to.y * right.z
-      return side >= 0 ? "Step to the right side" : "Step to the left side"
+      return side >= 0 ? ScanHelperText.rightSide : ScanHelperText.leftSide
     }
   }
 
