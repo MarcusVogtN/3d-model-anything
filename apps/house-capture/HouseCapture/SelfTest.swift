@@ -41,6 +41,75 @@ final class SelfTest {
     if ok { passed += 1; log("ok   \(what)") } else { failed += 1; log("FAIL \(what)") }
   }
 
+/// Scan helper: voxel clustering, sectors, reachability and the done rule (pure logic)
+  private func scanHelperLogic() {
+    typealias HA = HardAreas
+    func moved(_ v: SIMD3<Float>) -> simd_float4x4 {
+      var m = matrix_identity_float4x4
+      m.columns.3 = SIMD4<Float>(v, 1)
+      return m
+    }
+    var grid = HA.Grid()
+    // a 0.1 m thick bar 2 m long along x at 1.0 m height: every sample unsure
+    for i in 0..<20 {
+      let x = Float(i) * 0.1 + 0.05
+      for _ in 0..<50 { grid.add(SIMD3(x, 1.05, 0.05), unsure: true) }
+    }
+    // a sure wall-like patch, and an unsure blob too small to count
+    for i in 0..<20 { for _ in 0..<50 { grid.add(SIMD3(Float(i) * 0.1 + 0.05, 2.05, 3.05), unsure: false) } }
+    for i in 0..<5 { for _ in 0..<50 { grid.add(SIMD3(5.05 + Float(i) * 0.1, 1.05, 5.05), unsure: true) } }
+    // too few samples: not hard
+    for _ in 0..<40 { grid.add(SIMD3(-3.05, 1.05, -3.05), unsure: true) }
+    let keys = grid.hardKeys(walls: [], floorY: 0)
+    expect(keys.count == 25, "hard voxels need > 40 samples and > 50% unsure (got \(keys.count))")
+    let groups = HA.components(keys)
+    expect(groups.count == 1 && groups.first?.count == 20, "clusters keep >= 15 connected voxels")
+    // diagonal steps are 26-neighbour connected
+    let diagonal = (0..<16).map { HA.Key(Int32($0), Int32($0), Int32($0)) }
+    expect(HA.components(diagonal).count == 1, "26-neighbour connectivity joins diagonal voxels")
+    // walls and floor remove voxels
+    let wall = HA.Wall(transform: moved(SIMD3(1, 1, 0.1)), width: 4, height: 3)
+    expect(grid.hardKeys(walls: [wall], floorY: 0).filter { $0.z == 0 && $0.y == 10 }.isEmpty, "voxels within 12 cm of a wall are ignored")
+    expect(grid.hardKeys(walls: [], floorY: 1.02).filter { $0.y == 10 }.isEmpty, "voxels below floor + 6 cm are ignored")
+
+    var c = HA.cluster(groups[0])
+    expect(c.kind == .thinBars, "a long bar is thin bars")
+    expect(HA.sector(of: c.center + SIMD3(1, 0, 0.1), around: c.center) == 0, "sector 0 is +x")
+    expect(HA.sector(of: c.center + SIMD3(-1, 0, -0.1), around: c.center) == 4, "sector 4 is -x")
+    // obstacle column on the -z side (sectors 5, 6) blocks those stand points
+    var obstacles = Set<HA.Cell>()
+    for x in -30...30 { for z in -20 ... -5 { obstacles.insert(HA.Cell(Int32(x) + 10, Int32(z))) } }
+    let reach = HA.reachability(c.center, outline: [], obstacles: obstacles)
+    expect(!reach[5] && !reach[6] && reach[1] && reach[2], "mesh geometry makes sectors unreachable")
+    let outline: [SIMD2<Float>] = [SIMD2(-1, -0.3), SIMD2(3, -0.3), SIMD2(3, 3), SIMD2(-1, 3)]
+    let inRoom = HA.reachability(c.center, outline: outline, obstacles: [])
+    expect(!inRoom[5] && !inRoom[6] && inRoom[2], "stand points outside the room outline are unreachable")
+
+    func look(from p: SIMD3<Float>, manual: Bool = false) -> HA.View {
+      HA.View(position: p, forward: simd_normalize(c.center - p), manual: manual)
+    }
+    let ring: [SIMD3<Float>] = [SIMD3(1.5, 0, 0), SIMD3(0, 0, 1.5), SIMD3(-1.5, 0, 0)].map { c.center + $0 }
+    var photos = ring.map { look(from: $0) }
+    c.angles = HA.observe(c, photos: photos, floorY: 0, reachable: reach)
+    c.status = HA.status(c, c.angles, floorY: 0)
+    expect(c.angles.sectors.filter { $0 }.count == 3 && !c.status.done, "three sectors are not done without above and close-up")
+    expect(c.status.missing.contains(.above) && c.status.missing.contains(.closeup), "low bar asks for above and close-up")
+    expect(!c.status.missing.contains(.low), "low is only needed for clusters near the floor")
+    let farAway = HA.View(position: c.center + SIMD3(4, 0, 0), forward: SIMD3(-1, 0, 0), manual: false)
+    expect(!HA.sees(farAway, c.center), "photos farther than 2.5 m don't count")
+    let above = c.center + SIMD3(0.5, 0.8, 0)
+    expect(HA.addsAngle(c, view: look(from: above), floorY: 0), "a view from above adds a missing angle")
+    photos.append(look(from: above))
+    photos.append(look(from: c.center + SIMD3(0.7, 0, 0.2), manual: true))
+    c.angles = HA.observe(c, photos: photos, floorY: 0, reachable: reach)
+    c.status = HA.status(c, c.angles, floorY: 0)
+    expect(c.status.done && c.status.have == c.status.total, "sectors + above + close-up is done")
+    expect(!HA.addsAngle(c, view: look(from: ring[0]), floorY: 0), "done clusters don't ask for more photos")
+    var meter = MotionMeter()
+    for i in 0..<30 { meter.update(time: Double(i) / 60, transform: moved(SIMD3(Float(i) / 60, 0, 0))) }
+    expect(meter.tooFast, "1 m/s triggers move slower")
+  }
+
   private func roomExperience() throws {
     expect(!CaptureQuality(percent: 99, walls: 0, photos: 0).ready, "finish signal requires measured room and photos")
     expect(CaptureQuality(percent: 88, walls: 4, photos: 20).ready, "finish signal accepts sufficient coverage")
@@ -83,6 +152,7 @@ final class SelfTest {
     do {
       try await coveragePerformance()
       trackingRecovery()
+      scanHelperLogic()
       try roomExperience()
       try captureDiagnostics()
       try await previewNormals()

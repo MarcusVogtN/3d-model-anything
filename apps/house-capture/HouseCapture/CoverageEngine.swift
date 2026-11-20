@@ -238,6 +238,20 @@ final class CoverageEngine: @unchecked Sendable {
   }
   private var pendingView: Photo?
 
+  /// x/z cells (size `cell`) holding mesh vertices between minY and maxY: where the scan
+  /// helper can't ask someone to stand
+  func occupiedCells(minY: Float, maxY: Float, cell: Float, done: @escaping (Set<SIMD2<Int32>>) -> Void) {
+    queue.async {
+      var out = Set<SIMD2<Int32>>()
+      for a in self.anchors.values {
+        for p in a.world where p.y > minY && p.y < maxY {
+          out.insert(SIMD2<Int32>(Int32((p.x / cell).rounded(.down)), Int32((p.z / cell).rounded(.down))))
+        }
+      }
+      done(out)
+    }
+  }
+
   var pendingMeshUpdates: Int { pending.counts.pending }
   var coalescedMeshUpdates: Int { pending.counts.replaced }
 

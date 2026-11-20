@@ -326,6 +326,7 @@ struct CaptureScreen: View {
   private var scanControls: some View {
     VStack(spacing: 10) {
       if controller.captureReady {
+        ScanHelperHUD(helper: controller.scanHelper)
         tip(controller.quality.ready ? controller.quality.message : (controller.instruction ?? controller.quality.message))
         if controller.coveragePlateau && !controller.quality.ready {
           tip("Photo detail isn't improving much. You can save and review what you have; you don't need to keep circling.")
@@ -584,7 +585,7 @@ struct CoverageRing: View {
 private struct Legend: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
-      ForEach([(Color.red, "needs photos"), (.green, "captured")], id: \.1) { color, label in
+      ForEach([(Color.red, "needs photos"), (.green, "captured"), (ScanHelperHUD.purple, "hard spot")], id: \.1) { color, label in
         HStack(spacing: 4) {
           Circle().fill(color).frame(width: 7, height: 7)
           Text(label).font(.system(size: 9))

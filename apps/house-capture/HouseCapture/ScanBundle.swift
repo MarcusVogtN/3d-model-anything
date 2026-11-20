@@ -279,6 +279,8 @@ struct Manifest: Codable {
   var depthFrames: String?
   var depthFrameCount: Int?
   var diagnostics: Diagnostics?
+  /// scan helper output per room ("helper/room-N-hard_areas.json"); optional, readers may ignore it
+  var hardAreas: [String]? = nil
 }
 
 /// What the capture session actually did, for debugging bundles after the fact

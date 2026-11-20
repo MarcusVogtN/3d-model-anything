@@ -66,6 +66,10 @@ Documents/Houses/<house>/
     depth/NNNNN.f16z       256×192 Float16 depth (m), raw DEFLATE: zlib.decompress(data, -15)
     depth/NNNNN.conf       256×192 UInt8 confidence (0–2)
     depth/NNNNN.jpg        640×480 color of the same frame
+    helper/hard_areas.json scan helper output of the latest finished room (same as its room-N file)
+    helper/room-N-hard_areas.json  per room: { version: 1, room, voxelSize: 0.1, clusters: [{ center, min, max,
+                              voxels, angles: { sectors[8], reachable[8], above, low, closeup }, done }],
+                              warnings: { slowSeconds, darkSeconds, glareSeconds } }; listed in manifest.hardAreas
 ```
 
 **Coordinates**: each session is in its own ARKit world: meters, +Y up (gravity), right-handed
@@ -144,6 +148,33 @@ This benchmark uses photo poses without depth occlusion; it is not a live phone 
 Thermal pressure, memory warnings and long scans reduce depth recording, photo frequency and coverage evaluation work. High-resolution automatic photos are disabled under constrained budgets. After a large map or four rooms, save and start a fresh scan rather than extending the same map further.
 
 After each room, **Review saved room in 3D** opens the textured preview. Use coverage colours to inspect missing photography. A room's **Connect to another room** action shows numbered doorway plans, supports a 180-degree orientation choice, and requires a combined preview before saving. This is manual doorway alignment; it does not claim an automatic verified registration. The reference room must already be placed in the house and both captures must have established tracking.
+
+## Scan helper
+
+While scanning, the helper marks places the LiDAR is unsure about (thin bars, gym machines, black or
+shiny things, glass, clutter) and asks for the photos they need. Guidance only: it never blocks saving.
+
+- **Hard spots**: each depth frame's confidence map (low/medium = unsure, every 2nd pixel, 0.2–3.5 m)
+  goes into a 10 cm voxel hash. A voxel is hard when > 50% of its > 40 samples are unsure. Voxels within
+  12 cm of a RoomPlan wall or below floor + 6 cm are ignored; 26-connected clusters of ≥ 15 voxels are
+  drawn as translucent **purple** cubes, **green** once done. Thresholds match the PC check (`HardAreas.swift`).
+- **Angle checklist** per spot, from saved photos within 2.5 m that look at it (central ~60°): 8 azimuth
+  sectors, from above (≥ 0.3 m over the top, pitched down > 25°; needed when the top is below 1.7 m), low
+  (camera < 0.8 m; needed when the bottom is below 0.5 m) and one manual close-up within 1 m. A sector only
+  counts as needed when someone can stand there (inside the room outline, no LiDAR mesh 0.1–1.9 m high
+  within 0.2 m). Done = all reachable sectors or 3, plus the extras. The chip says what to do next.
+- **Move slower** above 60°/s or 0.6 m/s (smoothed over 0.3 s; light haptic at most every 3 s).
+- **Too dark** (ambient light < 250 or ISO > 800 for 2 s) and **bright window/lamp** (> 8% of luma ≥ 250).
+- **Auto photos near hard spots**: a view that adds a missing angle (new sector, from above, low) to a
+  spot that isn't done is shot even without coverage gain (the near-duplicate filter still applies), and
+  such views try a full-resolution still even with the high-res toggle off (only when not constrained,
+  thermal nominal, supported, 3 s apart).
+- **Sharper auto photos**: auto photos over 3 px predicted blur are dropped (was 6 px; the PC check counts
+  > 3 px as blurry). The reduced-capture photo cap is 300 photos per room (was 150); thermal and memory
+  guards are unchanged.
+
+Depth integration runs on its own queue at the depth-recording rate, clusters refresh every 1 s (2 s when
+constrained), and all hard-area work stops at critical thermal state.
 
 ## Sharing and importing
 

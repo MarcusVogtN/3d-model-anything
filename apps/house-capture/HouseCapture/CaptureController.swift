@@ -121,8 +121,13 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     return s
   }()
   let engine = CoverageEngine()
+  /// live hard-area / motion / light guidance (never blocks saving)
+  private(set) lazy var scanHelper = ScanHelper()
+  /// room index → helper/room-N-hard_areas.json
+  private var hardAreaFiles: [Int: String] = [:]
   private(set) lazy var scanView: ScanView = {
     let scan = ScanView(session: arSession, engine: engine)
+    scanHelper.attach(to: scan.view)
     scan.onSessionFailure = { [weak self] chain in
       guard let self, !self.closed else { return }
       self.sessionNeedsRestart = true
@@ -685,6 +690,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     hint = .none
     engine.setRoom(nil)
     scanView.showRoom(nil)
+    scanHelper.startRoom()
     phase = .scanning
     applyGhostOpacity()
     refreshCoverage()
@@ -812,6 +818,13 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     record.photoCoverage = record.photographedPercent
     record.detailSeconds = roomStartedAt.map { Date().timeIntervalSince($0) }
     record.detailPhotos = roomPhotoCount
+    // scan helper: hard areas + angle checklist of this room (guidance only; failure is logged)
+    let hardFile = "helper/room-\(index)-hard_areas.json"
+    if await scanHelper.export(room: index, to: [bundle.file(hardFile), bundle.file("helper/hard_areas.json")]) {
+      hardAreaFiles[index] = hardFile
+    } else {
+      diagnostics.log("hard areas not saved for room \(index)", since: startedAt)
+    }
     rooms.append(record)
     pendingRoomIDs[index] = selectedRoomID
     do {
@@ -850,6 +863,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     if !last.file.isEmpty { capturedRooms.removeLast() }
     bundle.deleteRoom(index: last.index)
     try? FileManager.default.removeItem(at: bundle.file("mesh/room-\(last.index).ply"))
+    if let hard = hardAreaFiles.removeValue(forKey: last.index) { try? FileManager.default.removeItem(at: bundle.file(hard)) }
     for photo in photos where photo.room == last.index {
       try? FileManager.default.removeItem(at: bundle.file(photo.file))
     }
@@ -1049,7 +1063,8 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       photoCount: photos.count,
       depthFrames: depthRecorder.records.isEmpty ? nil : "depth/frames.json",
       depthFrameCount: depthRecorder.records.count,
-      diagnostics: diagnostics
+      diagnostics: diagnostics,
+      hardAreas: hardAreaFiles.isEmpty ? nil : hardAreaFiles.keys.sorted().compactMap { hardAreaFiles[$0] }
     ))
   }
 
@@ -1060,6 +1075,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     liveRoom = room
     refreshCoverage()
     scanView.showRoom(room)
+    scanHelper.setRoom(room)
     // RoomPlan's surfaces feed the coverage engine too (areas the LiDAR hasn't reached yet)
     let now = CACurrentMediaTime()
     if now - lastRoomToEngine > 2 {
@@ -1325,6 +1341,8 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     guard !paused, captureReady else { return }
     let budget = captureBudget
     depthRecorder.consider(frame, room: roomIndex, camera: cameraControl.state(for: frame), interval: budget.depthInterval)
+    let control = cameraControl
+    scanHelper.tick(frame, budget: budget, engine: engine) { control.state(for: frame).iso }
     if frame.timestamp - lastEvaluate > budget.evaluationInterval {
       lastEvaluate = frame.timestamp
       engine.evaluate(view: Self.enginePhoto(frame: frame, sharpness: 1, depth: nil, room: roomIndex))
@@ -1372,7 +1390,10 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     let recent = photoViews.suffix(8)
     guard recent.allSatisfy({ simd_distance($0.view.position, view.position) > 0.12 || simd_dot($0.view.forward, view.forward) < cos(Float.pi / 18) }) else { return }
     if stats.meshArea > 0.5 || stats.targetsCovered > 0 || liveRoom != nil {
-      guard engine.latestGain > Self.minimumGain else { return }
+      // near a hard spot, a new angle of it is worth a photo even without coverage gain
+      if !scanHelper.addsNewAngle(frame.camera.transform) {
+        guard engine.latestGain > Self.minimumGain else { return }
+      }
     } else {
       guard abs(view.forward.y) < 0.75 else { return }
       let isNew = photoViews.allSatisfy { simd_distance($0.view.position, view.position) > 0.5 || simd_dot($0.view.forward, view.forward) < cos(Float.pi / 7) }
@@ -1408,7 +1429,9 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     guard let held = candidate else { return }
     candidate = nil
     guard held.blur <= Self.acceptableBlur else { return }
-    guard !captureBudget.constrained, allowHighResolution, highResolutionPhotos, highResSupported, !highResInFlight,
+    // full-res still: when the toggle is on, or for a view of a hard spot that isn't done yet
+    let wantsHighRes = highResolutionPhotos || (Self.highResNearHardAreas && scanHelper.viewsOpenSpot(held.transform))
+    guard !captureBudget.constrained, allowHighResolution, wantsHighRes, highResSupported, !highResInFlight,
           captureReady, phase == .scanning,
           ProcessInfo.processInfo.thermalState == .nominal,
           CACurrentMediaTime() - lastHighResRequest >= 3 else {
@@ -1443,7 +1466,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
         let relative = blur / Float(frame.camera.imageResolution.width) * 1920
         let heldView = PhotoView(transform: held.transform), hrView = PhotoView(transform: frame.camera.transform)
         let sameView = simd_distance(heldView.position, hrView.position) < 0.2 && simd_dot(heldView.forward, hrView.forward) > cos(Float.pi / 15)
-        if frame.camera.imageResolution.width > held.resolution.width, relative <= max(held.blur, Self.sharpBlur) * 1.2, sameView {
+        if frame.camera.imageResolution.width > held.resolution.width, relative <= min(Self.acceptableBlur, max(held.blur, Self.sharpBlur) * 1.2), sameView {
           guard let buffer = Self.copy(frame.capturedImage) else {
             self.save(held, manual: false)
             return
@@ -1460,9 +1483,12 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     }
   }
 
-  /// Under ~1.5 px of smear (at 1920 wide) is effectively sharp; up to 6 px is still usable.
+  /// Under ~1.5 px of smear (at 1920 wide) is effectively sharp; auto photos over 3 px are
+  /// dropped (the PC check counts > 3 px as blurry). Must stay > sharpBlur (sharpness() divides by the gap).
   nonisolated private static let sharpBlur: Float = 1.5
-  nonisolated private static let acceptableBlur: Float = 6
+  nonisolated private static let acceptableBlur: Float = 3
+  /// try a full-resolution still for hard-spot views even with the high-res toggle off
+  private static let highResNearHardAreas = true
   /// m² of not-yet-covered surface a photo must add
   private static let minimumGain: Float = 0.06
   /// long edge of saved photos; full-res stills are scaled down to this
@@ -1524,6 +1550,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
           self.photoViews.append((record.room, view))
           self.enginePhotos.append(enginePhoto)
           self.engine.add(enginePhoto)
+          self.scanHelper.photoSaved(position: view.position, forward: view.forward, manual: manual)
           self.photoCount = self.photos.count
           self.roomPhotoCount += 1
           self.refreshCoverage()
